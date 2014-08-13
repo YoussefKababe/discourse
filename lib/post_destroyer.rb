@@ -26,7 +26,8 @@ class PostDestroyer
   end
 
   def initialize(user, post)
-    @user, @post = user, post
+    @user = user
+    @post = post
   end
 
   def destroy
@@ -43,11 +44,13 @@ class PostDestroyer
     elsif @user.staff? || @user.id == @post.user_id
       user_recovered
     end
+    @post.topic.recover! if @post.post_number == 1
     @post.topic.update_statistics
   end
 
   def staff_recovered
     @post.recover!
+    publish("recovered")
   end
 
   # When a post is properly deleted. Well, it's still soft deleted, but it will no longer
@@ -61,13 +64,30 @@ class PostDestroyer
         feature_users_in_the_topic
         Topic.reset_highest(@post.topic_id)
       end
-      trash_post_actions
+      trash_public_post_actions
+      agree_with_flags
+      trash_user_actions
       @post.update_flagged_posts_count
       remove_associated_replies
       remove_associated_notifications
-      @post.topic.trash!(@user) if @post.topic and @post.post_number == 1
+      @post.topic.trash!(@user) if @post.topic && @post.post_number == 1
       update_associated_category_latest_topic
     end
+    publish("deleted")
+  end
+
+  def publish(message)
+    # edge case, topic is already destroyed
+    return unless @post.topic
+
+    MessageBus.publish("/topic/#{@post.topic_id}",{
+                    id: @post.id,
+                    post_number: @post.post_number,
+                    updated_at: @post.updated_at,
+                    type: message
+                  },
+                  group_ids: @post.topic.secure_group_ids
+    )
   end
 
   # When a user 'deletes' their own post. We just change the text.
@@ -113,13 +133,29 @@ class PostDestroyer
     Jobs.enqueue(:feature_topic_users, topic_id: @post.topic_id, except_post_id: @post.id)
   end
 
-  def trash_post_actions
-    @post.post_actions.each do |pa|
-      pa.trash!(@user)
-    end
+  def trash_public_post_actions
+    public_post_actions = PostAction.publics.where(post_id: @post.id)
+    public_post_actions.each { |pa| pa.trash!(@user) }
 
-    f = PostActionType.types.map{|k,v| ["#{k}_count", 0]}
+    f = PostActionType.public_types.map { |k,v| ["#{k}_count", 0] }
     Post.with_deleted.where(id: @post.id).update_all(Hash[*f.flatten])
+  end
+
+  def agree_with_flags
+    PostAction.agree_flags!(@post, @user, delete_post: true)
+  end
+
+  def trash_user_actions
+    UserAction.where(target_post_id: @post.id).each do |ua|
+      row = {
+        action_type: ua.action_type,
+        user_id: ua.user_id,
+        acting_user_id: ua.acting_user_id,
+        target_topic_id: ua.target_topic_id,
+        target_post_id: ua.target_post_id
+      }
+      UserAction.remove_action!(row)
+    end
   end
 
   def remove_associated_replies

@@ -88,8 +88,8 @@ gem 'active_model_serializers'
 gem 'onebox'
 
 gem 'ember-rails'
-gem 'ember-source', '~> 1.2.0.1'
-gem 'handlebars-source', '~> 1.1.2'
+gem 'ember-source', '1.6.0.beta.2'
+gem 'handlebars-source', '1.3.0'
 gem 'barber'
 
 gem 'message_bus'
@@ -102,7 +102,7 @@ gem 'fast_xs'
 
 gem 'fast_xor'
 gem 'fastimage'
-gem 'fog', '1.18.0', require: false
+gem 'fog', '1.22.1', require: false
 gem 'unf', require: false
 
 # see: https://twitter.com/samsaffron/status/412360162297393152
@@ -116,9 +116,6 @@ gem 'email_reply_parser-discourse', require: 'email_reply_parser'
 #
 # Sam: held back, getting weird errors in latest
 gem 'image_optim', '0.9.1'
-# note: for image_sorcery to correctly work you need
-# sudo apt-get install -y imagemagick
-gem 'image_sorcery'
 gem 'multi_json'
 gem 'mustache'
 gem 'nokogiri'
@@ -129,9 +126,11 @@ gem 'omniauth-facebook'
 gem 'omniauth-twitter'
 gem 'omniauth-github'
 gem 'omniauth-oauth2', require: false
+gem 'omniauth-google-oauth2'
 gem 'oj'
 # while resolving https://groups.google.com/forum/#!topic/ruby-pg/5_ylGmog1S4
 gem 'pg', '0.15.1'
+gem 'pry-rails', require: false
 gem 'rake'
 
 
@@ -140,9 +139,9 @@ gem 'rinku'
 gem 'sanitize'
 gem 'sass'
 gem 'sidekiq'
-gem 'sidekiq-failures'
+
+# for sidekiq web
 gem 'sinatra', require: nil
-gem 'slim'  # required for sidekiq-web
 
 gem 'therubyracer'
 gem 'thin', require: false
@@ -176,7 +175,6 @@ group :test, :development do
   gem 'simplecov', require: false
   gem 'timecop'
   gem 'rspec-given'
-  gem 'pry-rails'
   gem 'pry-nav'
   gem 'spork-rails'
 end
@@ -189,10 +187,6 @@ group :development do
   gem 'foreman', require: false
 end
 
-# Gem that enables support for plugins. It is required.
-# TODO: does this really need to be a gem ?
-gem 'discourse_plugin', path: 'vendor/gems/discourse_plugin'
-
 # this is an optional gem, it provides a high performance replacement
 # to String#blank? a method that is called quite frequently in current
 # ActiveRecord, this may change in the future
@@ -201,6 +195,8 @@ gem 'fast_blank' #, github: "SamSaffron/fast_blank"
 # this provides a very efficient lru cache
 gem 'lru_redux'
 
+gem 'htmlentities', require: false
+
 # IMPORTANT: mini profiler monkey patches, so it better be required last
 #  If you want to amend mini profiler to do the monkey patches in the railstie
 #  we are open to it. by deferring require to the initializer we can configure discourse installs without it
@@ -208,17 +204,22 @@ gem 'lru_redux'
 gem 'flamegraph', require: false
 gem 'rack-mini-profiler', require: false
 
-# used for caching, optional
-gem 'rack-cors', require: false
 gem 'unicorn', require: false
 gem 'puma', require: false
 gem 'rbtrace', require: false, platform: :mri
 
 # required for feed importing and embedding
+#
 gem 'ruby-readability', require: false
+
 gem 'simple-rss', require: false
 gem 'gctools', require: false, platform: :mri_21
 gem 'stackprof', require: false, platform: :mri_21
+gem 'memory_profiler', require: false, platform: :mri_21
+
+gem 'rmmseg-cpp', require: false
+
+gem 'logster'
 
 # perftools only works on 1.9 atm
 group :profile do

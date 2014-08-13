@@ -8,10 +8,21 @@ class PostRevisor
     @post = post
   end
 
-  def revise!(user, new_raw, opts = {})
-    @user, @new_raw, @opts = user, new_raw, opts
-    return false if not should_revise?
-    @post.acting_user = @user
+  # Recognized options:
+  #  :edit_reason User-supplied edit reason
+  #  :new_user New owner of the post
+  #  :revised_at changes the date of the revision
+  #  :force_new_version bypass ninja-edit window
+  #  :bypass_bump do not bump the topic, even if last post
+  #  :skip_validation ask ActiveRecord to skip validations
+  #
+  def revise!(editor, new_raw, opts = {})
+    @editor = editor
+    @opts = opts
+    @new_raw = TextCleaner.normalize_whitespaces(new_raw).strip
+
+    return false unless should_revise?
+    @post.acting_user = @editor
     revise_post
     update_category_description
     update_topic_excerpt
@@ -20,6 +31,7 @@ class PostRevisor
     @post.advance_draft_sequence
     PostAlerter.new.after_save_post(@post)
     publish_revision
+    BadgeGranter.queue_badge_grant(Badge::Trigger::PostRevision, post: @post)
 
     true
   end
@@ -38,7 +50,7 @@ class PostRevisor
   end
 
   def should_revise?
-    @post.raw != @new_raw
+    @post.raw != @new_raw || @opts[:changed_owner]
   end
 
   def revise_post
@@ -54,8 +66,9 @@ class PostRevisor
   end
 
   def should_create_new_version?
-    @post.last_editor_id != @user.id ||
+    @post.last_editor_id != @editor.id ||
     get_revised_at - @post.last_version_at > SiteSetting.ninja_edit_window.to_i ||
+    @opts[:changed_owner] == true ||
     @opts[:force_new_version] == true
   end
 
@@ -64,7 +77,7 @@ class PostRevisor
       @post.version += 1
       @post.last_version_at = get_revised_at
       update_post
-      EditRateLimiter.new(@post.user).performed! unless @opts[:bypass_rate_limiter] == true
+      EditRateLimiter.new(@editor).performed! unless @opts[:bypass_rate_limiter] == true
       bump_topic unless @opts[:bypass_bump]
     end
   end
@@ -72,6 +85,7 @@ class PostRevisor
   def bump_topic
     unless Post.where('post_number > ? and topic_id = ?', @post.post_number, @post.topic_id).exists?
       @post.topic.update_column(:bumped_at, Time.now)
+      TopicTrackingState.publish_latest(@post.topic)
     end
   end
 
@@ -84,15 +98,14 @@ class PostRevisor
   def update_post
     @post.raw = @new_raw
     @post.word_count = @new_raw.scan(/\w+/).size
-    @post.last_editor_id = @user.id
+    @post.last_editor_id = @editor.id
     @post.edit_reason = @opts[:edit_reason] if @opts[:edit_reason]
+    @post.user_id = @opts[:new_user].id if @opts[:new_user]
+    @post.self_edits += 1 if @editor == @post.user
 
-    if @post.hidden && @post.hidden_reason_id == Post.hidden_reasons[:flag_threshold_reached]
-      @post.hidden = false
-      @post.hidden_reason_id = nil
-      @post.topic.update_attributes(visible: true)
-
-      PostAction.clear_flags!(@post, -1)
+    if @editor == @post.user && @post.hidden && @post.hidden_reason_id == Post.hidden_reasons[:flag_threshold_reached]
+      PostAction.clear_flags!(@post, Discourse.system_user)
+      @post.unhide!
     end
 
     @post.extract_quoted_post_numbers
@@ -106,7 +119,7 @@ class PostRevisor
     return unless @post.post_number == 1
 
     # Is there a category with our topic id?
-    category = Category.where(topic_id: @post.topic_id).first
+    category = Category.find_by(topic_id: @post.topic_id)
     return unless category.present?
 
     # If found, update its description

@@ -23,6 +23,25 @@ Discourse.AdminUser = Discourse.User.extend({
     });
   },
 
+  groupAdded: function(added){
+    var self = this;
+    return Discourse.ajax("/admin/users/" + this.get('id') + "/groups", {
+      type: 'POST',
+      data: {group_id: added.id}
+    }).then(function () {
+      self.get('groups').pushObject(added);
+    });
+  },
+
+  groupRemoved: function(removed){
+    var self = this;
+    return Discourse.ajax("/admin/users/" + this.get('id') + "/groups/" + removed.id, {
+      type: 'DELETE'
+    }).then(function () {
+      self.set('groups.[]', self.get('groups').rejectBy("id", removed.id));
+    });
+  },
+
   /**
     Revokes a user's current API key
 
@@ -38,7 +57,11 @@ Discourse.AdminUser = Discourse.User.extend({
 
   deleteAllPostsExplanation: function() {
     if (!this.get('can_delete_all_posts')) {
-      return I18n.t('admin.user.cant_delete_all_posts', {count: Discourse.SiteSettings.delete_user_max_post_age});
+      if (this.get('post_count') > Discourse.SiteSettings.delete_all_posts_max) {
+        return I18n.t('admin.user.cant_delete_all_too_many_posts', {count: Discourse.SiteSettings.delete_all_posts_max});
+      } else {
+        return I18n.t('admin.user.cant_delete_all_posts', {count: Discourse.SiteSettings.delete_user_max_post_age});
+      }
     } else {
       return null;
     }
@@ -132,7 +155,11 @@ Discourse.AdminUser = Discourse.User.extend({
       window.location.reload();
     }, function(e) {
       // failure
-      var error = I18n.t('admin.user.trust_level_change_failed', { error: "http: " + e.status + " - " + e.body });
+      var error;
+      if (e.responseJSON && e.responseJSON.errors) {
+        error = e.responseJSON.errors[0];
+      }
+      error = error || I18n.t('admin.user.trust_level_change_failed', { error: "http: " + e.status + " - " + e.body });
       bootbox.alert(error);
     });
   },
@@ -168,6 +195,17 @@ Discourse.AdminUser = Discourse.User.extend({
       var error = I18n.t('admin.user.unsuspend_failed', { error: "http: " + e.status + " - " + e.body });
       bootbox.alert(error);
     });
+  },
+
+  log_out: function(){
+    Discourse.ajax("/admin/users/" + this.id + "/log_out", {
+      type: 'POST',
+      data: { username_or_email: this.get('username') }
+    }).then(
+      function(){
+        bootbox.alert(I18n.t("admin.user.logged_out"));
+      }
+      );
   },
 
   impersonate: function() {
@@ -279,11 +317,11 @@ Discourse.AdminUser = Discourse.User.extend({
         } else {
           bootbox.alert(I18n.t("admin.user.delete_failed"));
           if (data.user) {
-            user.mergeAttributes(data.user);
+            user.setProperties(data.user);
           }
         }
       }, function() {
-        Discourse.AdminUser.find( user.get('username') ).then(function(u){ user.mergeAttributes(u); });
+        Discourse.AdminUser.find( user.get('username') ).then(function(u){ user.setProperties(u); });
         bootbox.alert(I18n.t("admin.user.delete_failed"));
       });
     };
@@ -295,14 +333,14 @@ Discourse.AdminUser = Discourse.User.extend({
       "class": "cancel",
       "link":  true
     }, {
-      "label": '<i class="fa fa-exclamation-triangle"></i> ' + I18n.t('admin.user.delete_dont_block'),
+      "label": I18n.t('admin.user.delete_dont_block'),
       "class": "btn",
       "callback": function(){
         performDestroy(false);
       }
     }, {
-      "label": '<i class="fa fa-exclamation-triangle"></i> ' + I18n.t('admin.user.delete_and_block'),
-      "class": "btn",
+      "label": '<i class="fa fa-exclamation-triangle"></i>' + I18n.t('admin.user.delete_and_block'),
+      "class": "btn btn-danger",
       "callback": function(){
         performDestroy(true);
       }
@@ -416,7 +454,7 @@ Discourse.AdminUser.reopenClass({
 
   findAll: function(query, filter) {
     return Discourse.ajax("/admin/users/list/" + query + ".json", {
-      data: { filter: filter }
+      data: filter
     }).then(function(users) {
       return users.map(function(u) {
         return Discourse.AdminUser.create(u);

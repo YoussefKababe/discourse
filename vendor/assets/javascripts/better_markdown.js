@@ -473,8 +473,12 @@
       delete attributes.src;
     }
 
-    for ( var a in attributes )
-      tag_attrs += " " + a + '="' + escapeHTML( attributes[ a ] ) + '"';
+    for ( var a in attributes ) {
+      var escaped = escapeHTML( attributes[ a ]);
+      if (escaped && escaped.length) {
+        tag_attrs += " " + a + '="' + escaped + '"';
+      }
+    }
 
     // be careful about adding whitespace here for inline elements
     if ( tag === "img" || tag === "br" || tag === "hr" )
@@ -577,7 +581,7 @@
       jsonml[ 0 ] = "img";
 
       // grab this ref and clean up the attribute node
-      ref = references[ attrs.ref ];
+      var ref = references[ attrs.ref ];
 
       // if the reference exists, make the link
       if ( ref ) {
@@ -662,7 +666,7 @@
         return [consumed, null, nodes];
       }
 
-      var res = this.dialect.inline.__oneElement__.call(this, text.substr( consumed ), patterns );
+      var res = this.dialect.inline.__oneElement__.call(this, text.substr( consumed ), patterns, [text.substr(0, consumed)]);
       consumed += res[ 0 ];
       // Add any returned nodes.
       nodes.push.apply( nodes, res.slice( 1 ) );
@@ -745,7 +749,8 @@
         block_search:
         do {
           // Now pull out the rest of the lines
-          var b = this.loop_re_over_block(re, block.valueOf(), function(m) { ret.push( m[1] ); });
+          var b = this.loop_re_over_block(
+                    re, block.valueOf(), function( m ) { ret.push( m[1] ); } );
 
           if ( b.length ) {
             // Case alluded to in first comment. push it back on as a new block
@@ -1008,21 +1013,24 @@
             } // tight_search
 
             if ( li_accumulate.length ) {
+
               var contents = this.processBlock(li_accumulate, []),
                   firstBlock = contents[0];
 
-              firstBlock.shift();
-              contents.splice.apply(contents, [0, 1].concat(firstBlock));
-              add( last_li, loose, contents, nl );
+              if (firstBlock) {
+                firstBlock.shift();
+                contents.splice.apply(contents, [0, 1].concat(firstBlock));
+                add( last_li, loose, contents, nl );
 
-              // Let's not creating a trailing \n after content in the li
-              if(last_li[last_li.length-1] === "\n") {
-                last_li.pop();
+                // Let's not creating a trailing \n after content in the li
+                if(last_li[last_li.length-1] === "\n") {
+                  last_li.pop();
+                }
+
+                // Loose mode will have been dealt with. Reset it
+                loose = false;
+                li_accumulate = "";
               }
-
-              // Loose mode will have been dealt with. Reset it
-              loose = false;
-              li_accumulate = "";
             }
 
             // Look at the next block - we might have a loose list. Or an extra
@@ -1039,11 +1047,11 @@
 
             var next_block = next[0] && next[0].valueOf() || "";
 
-            if ( next_block.match(is_list_re) ) {
+            if ( next_block.match(is_list_re) )  {
               block = next.shift();
 
               // Check for an HR following a list: features/lists/hr_abutting
-              var hr = this.dialect.block.horizRule( block, next );
+              var hr = this.dialect.block.horizRule.call( this, block, next );
 
               if ( hr ) {
                 ret.push.apply(ret, hr);
@@ -1110,6 +1118,7 @@
 
         // Strip off the leading "> " and re-process as a block.
         var input = block.replace( /^> ?/gm, "" ),
+            old_tree = this.tree,
             processedBlock = this.toTree( input, [ "blockquote" ] ),
             attr = extract_attr( processedBlock );
 
@@ -1153,28 +1162,32 @@
     inline: {
 
       __oneElement__: function oneElement( text, patterns_or_re, previous_nodes ) {
-        var m, res;
 
+        // PERF NOTE: rewritten to avoid greedy match regex \([\s\S]*?)(...)\
+        // greedy match performs horribly with large inline blocks, it can be so
+        // slow it will crash chrome
         patterns_or_re = patterns_or_re || this.dialect.inline.__patterns__;
-        var re = new RegExp( "([\\s\\S]*?)(" + (patterns_or_re.source || patterns_or_re) + ")" );
 
-        m = re.exec( text );
-        if (!m) {
-          // Just boring text
+        var search_re = new RegExp(patterns_or_re.source || patterns_or_re);
+        var pos = text.search(search_re);
+
+        if (pos === -1) {
           return [ text.length, text ];
-        }
-        else if ( m[1] ) {
+        } else if (pos !== 0) {
           // Some un-interesting text matched. Return that first
-          return [ m[1].length, m[1] ];
+          return [pos, text.substring(0,pos)];
         }
 
-        if ( m[2] in this.dialect.inline ) {
-          res = this.dialect.inline[ m[2] ].call(
+        var match_re = new RegExp( "^(" + (patterns_or_re.source || patterns_or_re) + ")" );
+        var m = match_re.exec( text );
+        var res;
+        if ( m[1] in this.dialect.inline ) {
+          res = this.dialect.inline[ m[1] ].call(
                     this,
                     text.substr( m.index ), m, previous_nodes || [] );
         }
         // Default for now to make dev easier. just slurp special and output it.
-        res = res || [ m[2].length, m[2] ];
+        res = res || [ m[1].length, m[1] ];
         return res;
       },
 
@@ -1200,7 +1213,7 @@
         return out;
       },
 
-      // These characters are intersting elsewhere, so have rules for them so that
+      // These characters are interesting elsewhere, so have rules for them so that
       // chunks of plain text blocks don't include them
       "]": function () {},
       "}": function () {},
@@ -1279,8 +1292,7 @@
 
         // No closing ']' found. Just consume the [
         if ( !res[1] ) {
-          var size = res[0] + 1;
-          return [ size, text.charAt(0) + res[2].join('') ];
+          return [ res[0] + 1, text.charAt(0) ].concat(res[2]);
         }
 
         var consumed = 1 + res[ 0 ],
@@ -1352,12 +1364,14 @@
           // [links][] uses links as its reference
           attrs = { ref: ( m[ 1 ] || String(children) ).toLowerCase(),  original: orig.substr( 0, consumed ) };
 
-          link = [ "link_ref", attrs ].concat( children );
+          if (children && children.length > 0) {
+            link = [ "link_ref", attrs ].concat( children );
 
-          // We can't check if the reference is known here as it likely wont be
-          // found till after. Check it in md tree->hmtl tree conversion.
-          // Store the original so that conversion can revert if the ref isn't found.
-          return [ consumed, link ];
+            // We can't check if the reference is known here as it likely wont be
+            // found till after. Check it in md tree->hmtl tree conversion.
+            // Store the original so that conversion can revert if the ref isn't found.
+            return [ consumed, link ];
+          }
         }
 
         // Another check for references

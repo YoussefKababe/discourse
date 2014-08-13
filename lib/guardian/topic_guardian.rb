@@ -7,9 +7,10 @@ module TopicGuardian
 
   # Creating Methods
   def can_create_topic?(parent)
-    user &&
-    user.trust_level >= SiteSetting.min_trust_to_create_topic.to_i &&
-    can_create_post?(parent)
+    is_staff? ||
+    (user &&
+      user.trust_level >= SiteSetting.min_trust_to_create_topic.to_i &&
+      can_create_post?(parent))
   end
 
   def can_create_topic_on_category?(category)
@@ -26,7 +27,10 @@ module TopicGuardian
 
   # Editing Method
   def can_edit_topic?(topic)
-    !topic.archived && (is_staff? || is_my_own?(topic) || user.has_trust_level?(:leader))
+    return false if topic.archived
+    return true if is_my_own?(topic)
+    return false if Discourse.static_doc_topic_ids.include?(topic.id) && !is_admin?
+    is_staff? || user.has_trust_level?(:leader)
   end
 
   # Recovery Method
@@ -44,21 +48,24 @@ module TopicGuardian
     authenticated? && topic && not(topic.private_message?) && @user.has_trust_level?(:basic)
   end
 
+  def can_see_deleted_topics?
+    is_staff?
+  end
+
   def can_see_topic?(topic)
-    if topic
-      is_staff? ||
+    return false unless topic
+    # Admins can see everything
+    return true if is_admin?
+    # Deleted topics
+    return false if topic.deleted_at && !can_see_deleted_topics?
 
-      topic.deleted_at.nil? &&
-
-      # not secure, or I can see it
-      (not(topic.read_restricted_category?) || can_see_category?(topic.category)) &&
-
-      # NOTE
-      # At the moment staff can see PMs, there is some talk of restricting this, however
-      # we still need to allow staff to join PMs for the case of flagging ones
-
-      # not private, or I am allowed (or is staff)
-      (not(topic.private_message?) || authenticated? && (topic.all_allowed_users.where(id: @user.id).exists? || is_staff?))
+    if topic.private_message?
+      return authenticated? &&
+             topic.all_allowed_users.where(id: @user.id).exists?
     end
+
+    # not secure, or I can see it
+    !topic.read_restricted_category? || can_see_category?(topic.category)
+
   end
 end

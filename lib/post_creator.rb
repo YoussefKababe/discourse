@@ -3,6 +3,7 @@
 require_dependency 'rate_limiter'
 require_dependency 'topic_creator'
 require_dependency 'post_jobs_enqueuer'
+require_dependency 'distributed_mutex'
 
 class PostCreator
 
@@ -18,6 +19,7 @@ class PostCreator
   #                             topic.
   #   created_at              - Post creation time (optional)
   #   auto_track              - Automatically track this topic if needed (default true)
+  #   custom_fields           - Custom fields to be added to the post, Hash (default nil)
   #
   #   When replying to a topic:
   #     topic_id              - topic we're replying to
@@ -45,6 +47,10 @@ class PostCreator
     @spam
   end
 
+  def skip_validations?
+    @opts[:skip_validations]
+  end
+
   def guardian
     @guardian ||= Guardian.new(@user)
   end
@@ -53,31 +59,40 @@ class PostCreator
     @topic = nil
     @post = nil
 
-    Post.transaction do
+    if @user.suspended? && !skip_validations?
+      @errors = Post.new.errors
+      @errors.add(:base, I18n.t(:user_is_suspended))
+      return
+    end
+
+    transaction do
       setup_topic
       setup_post
       rollback_if_host_spam_detected
       save_post
       extract_links
       store_unique_post_key
-      consider_clearing_flags
       track_topic
       update_topic_stats
       update_user_counts
       create_embedded_topic
 
-      publish
       ensure_in_allowed_users if guardian.is_staff?
       @post.advance_draft_sequence
       @post.save_reply_relationships
     end
 
-    if @post
-      PostAlerter.post_created(@post)
+    if @post && @post.errors.empty?
+      publish
+      PostAlerter.post_created(@post) unless @opts[:import_mode]
 
-      handle_spam
       track_latest_on_category
       enqueue_jobs
+      BadgeGranter.queue_badge_grant(Badge::Trigger::PostRevision, post: @post)
+    end
+
+    if @post || @spam
+      handle_spam unless @opts[:import_mode]
     end
 
     @post
@@ -105,10 +120,22 @@ class PostCreator
   def self.set_reply_user_id(post)
     return unless post.reply_to_post_number.present?
 
-    post.reply_to_user_id ||= Post.select(:user_id).where(topic_id: post.topic_id, post_number: post.reply_to_post_number).first.try(:user_id)
+    post.reply_to_user_id ||= Post.select(:user_id).find_by(topic_id: post.topic_id, post_number: post.reply_to_post_number).try(:user_id)
   end
 
   protected
+
+  def transaction(&blk)
+    Post.transaction do
+      if new_topic?
+        blk.call
+      else
+        # we need to ensure post_number is monotonically increasing with no gaps
+        # so we serialize creation to avoid needing rollbacks
+        DistributedMutex.synchronize("topic_id_#{@opts[:topic_id]}", &blk)
+      end
+    end
+  end
 
   # You can supply an `embed_url` for a post to set up the embedded relationship.
   # This is used by the wp-discourse plugin to associate a remote post with a
@@ -125,7 +152,7 @@ class PostCreator
                            { user: @user,
                              limit_once_per: 24.hours,
                              message_params: {domains: @post.linked_hosts.keys.join(', ')} } )
-    elsif @post && !@post.errors.present? && !@opts[:skip_validations]
+    elsif @post && !@post.errors.present? && !skip_validations?
       SpamRulesEnforcer.enforce!(@post)
     end
   end
@@ -145,25 +172,6 @@ class PostCreator
     end
   end
 
-  def clear_possible_flags(topic)
-    # at this point we know the topic is a PM and has been replied to ... check if we need to clear any flags
-    #
-    first_post = Post.select(:id).where(topic_id: topic.id).where('post_number = 1').first
-    post_action = nil
-
-    if first_post
-      post_action = PostAction.where(
-        related_post_id: first_post.id,
-        deleted_at: nil,
-        post_action_type_id: PostActionType.types[:notify_moderators]
-      ).first
-    end
-
-    if post_action
-      post_action.remove_act!(@user)
-    end
-  end
-
   private
 
   def setup_topic
@@ -179,7 +187,7 @@ class PostCreator
         raise ex
       end
     else
-      topic = Topic.where(id: @opts[:topic_id]).first
+      topic = Topic.find_by(id: @opts[:topic_id])
       guardian.ensure_can_create!(Post, topic)
     end
     @topic = topic
@@ -195,6 +203,8 @@ class PostCreator
   end
 
   def setup_post
+    @opts[:raw] = TextCleaner.normalize_whitespaces(@opts[:raw]).strip
+
     post = @topic.posts.new(raw: @opts[:raw],
                             user: @user,
                             reply_to_post_number: @opts[:reply_to_post_number])
@@ -207,11 +217,15 @@ class PostCreator
     post.extract_quoted_post_numbers
     post.created_at = Time.zone.parse(@opts[:created_at].to_s) if @opts[:created_at].present?
 
+    if fields = @opts[:custom_fields]
+      post.custom_fields = fields
+    end
+
     @post = post
   end
 
   def rollback_if_host_spam_detected
-    return if @opts[:skip_validations]
+    return if skip_validations?
     if @post.has_host_spam?
       @post.errors.add(:base, I18n.t(:spamming_host))
       @errors = @post.errors
@@ -221,7 +235,7 @@ class PostCreator
   end
 
   def save_post
-    unless @post.save(validate: !@opts[:skip_validations])
+    unless @post.save(validate: !skip_validations?)
       @errors = @post.errors
       raise ActiveRecord::Rollback.new
     end
@@ -231,24 +245,29 @@ class PostCreator
     @post.store_unique_post_key
   end
 
-  def consider_clearing_flags
-    return unless @topic.private_message? && @post.post_number > 1 && @topic.user_id != @post.user_id
-
-    clear_possible_flags(@topic)
-  end
-
   def update_user_counts
-    # We don't count replies to your own topics
-    if @user.id != @topic.user_id
-      @user.user_stat.update_topic_reply_count
-      @user.user_stat.save!
+    @user.create_user_stat if @user.user_stat.nil?
+
+    if @user.user_stat.first_post_created_at.nil?
+      @user.user_stat.first_post_created_at = @post.created_at
     end
+
+    @user.user_stat.post_count += 1
+    @user.user_stat.topic_count += 1 if @post.post_number == 1
+
+    # We don't count replies to your own topics
+    if !@opts[:import_mode] && @user.id != @topic.user_id
+      @user.user_stat.update_topic_reply_count
+    end
+
+    @user.user_stat.save!
 
     @user.last_posted_at = @post.created_at
     @user.save!
   end
 
   def publish
+    return if @opts[:import_mode]
     return unless @post.post_number > 1
 
     MessageBus.publish("/topic/#{@post.topic_id}",{
@@ -263,23 +282,32 @@ class PostCreator
 
   def extract_links
     TopicLink.extract_from(@post)
+    QuotedPost.extract_from(@post)
   end
 
   def track_topic
     return if @opts[:auto_track] == false
 
-    TopicUser.auto_track(@user.id, @topic.id, TopicUser.notification_reasons[:created_post])
-    # Update topic user data
     TopicUser.change(@post.user.id,
                      @post.topic.id,
                      posted: true,
                      last_read_post_number: @post.post_number,
                      seen_post_count: @post.post_number)
+
+
+    # assume it took us 5 seconds of reading time to make a post
+    PostTiming.record_timing(topic_id: @post.topic_id,
+                             user_id: @post.user_id,
+                             post_number: @post.post_number,
+                             msecs: 5000)
+
+
+    TopicUser.auto_track(@user.id, @topic.id, TopicUser.notification_reasons[:created_post])
   end
 
   def enqueue_jobs
     return unless @post && !@post.errors.present?
-    PostJobsEnqueuer.new(@post, @topic, new_topic?).enqueue_jobs
+    PostJobsEnqueuer.new(@post, @topic, new_topic?, {import_mode: @opts[:import_mode]}).enqueue_jobs
   end
 
   def new_topic?

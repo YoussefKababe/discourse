@@ -1,3 +1,16 @@
+
+{{#if showDismissAtTop}}
+<div class="row">
+{{#if showDismissRead}}
+  <button title="{{i18n topics.bulk.dismiss_topics_tooltip}}" class='btn dismiss-read' {{action dismissRead "topics"}}>{{i18n topics.bulk.dismiss_topics}}</button>
+  <button title="{{i18n topics.bulk.dismiss_posts_tooltip}}" class='btn dismiss-read' {{action dismissRead "posts"}}>{{i18n topics.bulk.dismiss_posts}}</button>
+{{/if}}
+{{#if showResetNew}}
+  <button class='btn dismiss-read' {{action resetNew}}>{{i18n topics.bulk.dismiss_new}}</button>
+{{/if}}
+</div>
+{{/if}}
+
 {{#if selected}}
   <div id='bulk-select'>
     <button class='btn no-text' {{action showBulkActions}}><i class="fa fa-wrench"></i></button>
@@ -5,8 +18,14 @@
 {{/if}}
 
 <div class='contents'>
+  {{#if top}}
+    {{#if yearly}}<h2><i class="fa fa-calendar-o"></i>&nbsp;{{i18n filters.top.this_year}}</h2>{{/if}}
+    {{#if monthly}}<h2><i class="fa fa-calendar-o"></i>&nbsp;{{i18n filters.top.this_month}}</h2>{{/if}}
+    {{#if weekly}}<h2><i class="fa fa-calendar-o"></i>&nbsp;{{i18n filters.top.this_week}}</h2>{{/if}}
+    {{#if daily}}<h2><i class="fa fa-calendar-o"></i>&nbsp;{{i18n filters.top.today}}</h2>{{/if}}
+  {{/if}}
   {{#if showTable}}
-    <table id='topic-list'>
+    <table class='topic-list'>
       <thead>
       <tr>
         {{#if currentUser}}
@@ -16,27 +35,26 @@
           {{/if}}
         </th>
         {{/if}}
-        {{#sortable-heading sortBy="default" sortOrder=sortOrder}}
+        {{#sortable-heading sortBy="default" action="changeSort" order=order ascending=ascending}}
           {{i18n topic.title}}
+
+
         {{/sortable-heading}}
         {{#unless controller.hideCategory}}
-          {{#sortable-heading sortBy="category" sortOrder=sortOrder}}
+          {{#sortable-heading sortBy="category" action="changeSort" order=order ascending=ascending}}
             {{i18n category_title}}
           {{/sortable-heading}}
         {{/unless}}
-        {{#sortable-heading sortBy="posters" sortOrder=sortOrder}}
+        {{#sortable-heading sortBy="posters" action="changeSort" order=order ascending=ascending}}
           {{i18n users}}
         {{/sortable-heading}}
-        {{#sortable-heading sortBy="posts" number=true sortOrder=sortOrder}}
+        {{#sortable-heading sortBy="posts" number=true action="changeSort" order=order ascending=ascending}}
           {{i18n posts}}
         {{/sortable-heading}}
-        {{#sortable-heading sortBy="likes" number=true sortOrder=sortOrder}}
-          {{i18n likes}}
-        {{/sortable-heading}}
-        {{#sortable-heading sortBy="views" number=true sortOrder=sortOrder}}
+        {{#sortable-heading sortBy="views" number=true action="changeSort" order=order ascending=ascending}}
           {{i18n views}}
         {{/sortable-heading}}
-        {{#sortable-heading sortBy="activity" number=true colspan="2" sortOrder=sortOrder}}
+        {{#sortable-heading sortBy="activity" number=true colspan="2" action="changeSort" order=order ascending=ascending}}
           {{i18n activity}}
         {{/sortable-heading}}
       </tr>
@@ -47,26 +65,30 @@
           <tr>
             <td colspan="9">
               <div class='alert alert-info clickable' {{action showInserted}}>
-                {{countI18n new_topics_inserted count=topicTrackingState.incomingCount}}
-                {{i18n show_new_topics}}
+                {{countI18n topic_count_ suffix=topicTrackingState.filter count=topicTrackingState.incomingCount}}
+                {{i18n click_to_show}}
               </div>
             </td>
           </tr>
         </tbody>
       {{/if}}
 
-      {{each topics itemController="topicListItem" itemViewClass="Discourse.TopicListItemView"}}
+      <tbody>
+        {{each topics itemController="topic-list-item" itemView="topic-list-item"}}
+      </tbody>
+
     </table>
   {{/if}}
 </div>
 
-<footer id='topic-list-bottom'>
+<footer class='topic-list-bottom'>
   {{#if loadingMore}}
     <div class='topics-loading'>{{i18n topic.loading_more}}</div>
   {{/if}}
   {{#if allLoaded}}
     {{#if showDismissRead}}
-      <button class='btn dismiss-read' {{action dismissRead}}>{{i18n topics.bulk.dismiss_read}}</button>
+      <button title="{{i18n topics.bulk.dismiss_topics_tooltip}}" class='btn dismiss-read' {{action dismissRead "topics"}}>{{i18n topics.bulk.dismiss_topics}}</button>
+      <button title="{{i18n topics.bulk.dismiss_posts_tooltip}}" class='btn dismiss-read' {{action dismissRead "posts"}}>{{i18n topics.bulk.dismiss_posts}}</button>
     {{/if}}
     {{#if showResetNew}}
       <button class='btn dismiss-read' {{action resetNew}}>{{i18n topics.bulk.dismiss_new}}</button>

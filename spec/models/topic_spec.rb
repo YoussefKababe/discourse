@@ -121,15 +121,15 @@ describe Topic do
     let(:topic_script) { build_topic_with_title("Topic with <script>alert('title')</script> script in its title" ) }
 
     it "escapes script contents" do
-      topic_script.title.should == "Topic with script in its title"
+      topic_script.fancy_title.should == "Topic with &lt;script&gt;alert(&lsquo;title&rsquo;)&lt;/script&gt; script in its title"
     end
 
     it "escapes bold contents" do
-      topic_bold.title.should == "Topic with bold text in its title"
+      topic_bold.fancy_title.should == "Topic with &lt;b&gt;bold&lt;/b&gt; text in its title"
     end
 
     it "escapes image contents" do
-      topic_image.title.should == "Topic with image in its title"
+      topic_image.fancy_title.should == "Topic with &lt;img src=&lsquo;something&rsquo;&gt; image in its title"
     end
 
   end
@@ -142,8 +142,8 @@ describe Topic do
         SiteSetting.stubs(:title_fancy_entities).returns(false)
       end
 
-      it "doesn't change the title to add entities" do
-        topic.fancy_title.should == topic.title
+      it "doesn't add entities to the title" do
+        topic.fancy_title.should == "&quot;this topic&quot; -- has ``fancy stuff&#39;&#39;"
       end
     end
 
@@ -202,8 +202,20 @@ describe Topic do
       Topic.similar_to(nil, nil).should be_blank
     end
 
+    context "with a category definition" do
+      let!(:category) { Fabricate(:category) }
+
+      it "excludes the category definition topic from similar_to" do
+        Topic.similar_to('category definition for', "no body").should be_blank
+      end
+    end
+
     context 'with a similar topic' do
-      let!(:topic) { Fabricate(:topic, title: "Evil trout is the dude who posted this topic") }
+      let!(:topic) {
+        ActiveRecord::Base.observers.enable :search_observer
+        post = create_post(title: "Evil trout is the dude who posted this topic")
+        post.topic
+      }
 
       it 'returns the similar topic if the title is similar' do
         Topic.similar_to("has evil trout made any topics?", "i am wondering has evil trout made any topics?").should == [topic]
@@ -250,7 +262,7 @@ describe Topic do
 
 
   context 'private message' do
-    let(:coding_horror) { User.where(username: 'CodingHorror').first }
+    let(:coding_horror) { User.find_by(username: "CodingHorror") }
     let(:evil_trout) { Fabricate(:evil_trout) }
     let(:topic) { Fabricate(:private_message_topic) }
 
@@ -266,11 +278,6 @@ describe Topic do
     end
 
     context 'invite' do
-
-      it "delegates to topic.invite_by_email when the user doesn't exist, but it's an email" do
-        topic.expects(:invite_by_email).with(topic.user, 'jake@adventuretime.ooo')
-        topic.invite(topic.user, 'jake@adventuretime.ooo')
-      end
 
       context 'existing user' do
         let(:walter) { Fabricate(:walter_white) }
@@ -292,17 +299,12 @@ describe Topic do
         end
 
         context 'by email' do
-          it 'returns true' do
-            topic.invite(topic.user, walter.email).should be_true
-          end
 
-          it 'adds walter to the allowed users' do
-            topic.invite(topic.user, walter.email)
+          it 'adds user correctly' do
+            lambda {
+              topic.invite(topic.user, walter.email).should be_true
+            }.should change(Notification, :count)
             topic.allowed_users.include?(walter).should be_true
-          end
-
-          it 'creates a notification' do
-            lambda { topic.invite(topic.user, walter.email) }.should change(Notification, :count)
           end
 
         end
@@ -616,6 +618,47 @@ describe Topic do
     end
   end
 
+  describe "banner" do
+
+    let(:topic) { Fabricate(:topic) }
+    let(:user) { topic.user }
+    let(:banner) { { html: "<p>BANNER</p>", url: topic.url, key: topic.id } }
+
+    before { topic.stubs(:banner).returns(banner) }
+
+    describe "make_banner!" do
+
+      it "changes the topic archetype to 'banner'" do
+        topic.expects(:add_moderator_post)
+        MessageBus.expects(:publish).with("/site/banner", banner)
+        topic.make_banner!(user)
+        topic.archetype.should == Archetype.banner
+      end
+
+      it "ensures only one banner topic at all time" do
+        banner_topic = Fabricate(:banner_topic)
+        Topic.where(archetype: Archetype.banner).count.should == 1
+
+        topic.make_banner!(user)
+        Topic.where(archetype: Archetype.banner).count.should == 1
+      end
+
+    end
+
+    describe "remove_banner!" do
+
+      it "resets the topic archetype" do
+        topic.expects(:add_moderator_post)
+        MessageBus.expects(:publish).with("/site/banner", nil)
+        topic.remove_banner!(user)
+        topic.archetype.should == Archetype.default
+      end
+
+    end
+
+
+  end
+
   context 'last_poster info' do
 
     before do
@@ -638,7 +681,7 @@ describe Topic do
       it 'updates the last_post_user_id to the second_user' do
         @topic.last_post_user_id.should == @second_user.id
         @topic.last_posted_at.to_i.should == @new_post.created_at.to_i
-        topic_user = @second_user.topic_users.where(topic_id: @topic.id).first
+        topic_user = @second_user.topic_users.find_by(topic_id: @topic.id)
         topic_user.posted?.should be_true
       end
 
@@ -690,6 +733,21 @@ describe Topic do
 
       end
 
+      context 'new key' do
+        before do
+          topic.update_meta_data('other' => 'key')
+          topic.save!
+        end
+
+        it "can be loaded" do
+          Topic.find(topic.id).meta_data["other"].should == "key"
+        end
+
+        it "is in sync with custom_fields" do
+          Topic.find(topic.id).custom_fields["other"].should == "key"
+        end
+      end
+
 
     end
 
@@ -708,10 +766,6 @@ describe Topic do
       topic.should_not be_closed
       topic.should_not be_archived
       topic.moderator_posts_count.should == 0
-    end
-
-    it "its user has a topics_count of 1" do
-      topic.user.created_topic_count.should == 1
     end
 
     context 'post' do
@@ -748,7 +802,7 @@ describe Topic do
       let(:category) { Fabricate(:category) }
 
       before do
-        topic.change_category(category.name)
+        topic.change_category_to_id(category.id)
       end
 
       it "creates a new revision" do
@@ -757,7 +811,7 @@ describe Topic do
 
       context "removing a category" do
         before do
-          topic.change_category(nil)
+          topic.change_category_to_id(nil)
         end
 
         it "creates a new revision" do
@@ -796,12 +850,12 @@ describe Topic do
     describe 'without a previous category' do
 
       it 'should not change the topic_count when not changed' do
-       lambda { @topic.change_category(@topic.category.name); @category.reload }.should_not change(@category, :topic_count)
+       lambda { @topic.change_category_to_id(@topic.category.id); @category.reload }.should_not change(@category, :topic_count)
       end
 
       describe 'changed category' do
         before do
-          @topic.change_category(@category.name)
+          @topic.change_category_to_id(@category.id)
           @category.reload
         end
 
@@ -813,14 +867,14 @@ describe Topic do
       end
 
       it "doesn't change the category when it can't be found" do
-        @topic.change_category('made up')
+        @topic.change_category_to_id(12312312)
         @topic.category_id.should == SiteSetting.uncategorized_category_id
       end
     end
 
     describe 'with a previous category' do
       before do
-        @topic.change_category(@category.name)
+        @topic.change_category_to_id(@category.id)
         @topic.reload
         @category.reload
       end
@@ -830,18 +884,18 @@ describe Topic do
       end
 
       it "doesn't change the topic_count when the value doesn't change" do
-        lambda { @topic.change_category(@category.name); @category.reload }.should_not change(@category, :topic_count)
+        lambda { @topic.change_category_to_id(@category.id); @category.reload }.should_not change(@category, :topic_count)
       end
 
       it "doesn't reset the category when given a name that doesn't exist" do
-        @topic.change_category('made up')
+        @topic.change_category_to_id(55556)
         @topic.category_id.should be_present
       end
 
       describe 'to a different category' do
         before do
           @new_category = Fabricate(:category, user: @user, name: '2nd category')
-          @topic.change_category(@new_category.name)
+          @topic.change_category_to_id(@new_category.id)
           @topic.reload
           @new_category.reload
           @category.reload
@@ -864,13 +918,13 @@ describe Topic do
         let!(:topic) { Fabricate(:topic, category: Fabricate(:category)) }
 
         it 'returns false' do
-          topic.change_category('').should eq(false) # don't use "be_false" here because it would also match nil
+          topic.change_category_to_id(nil).should eq(false) # don't use "be_false" here because it would also match nil
         end
       end
 
       describe 'when the category exists' do
         before do
-          @topic.change_category(nil)
+          @topic.change_category_to_id(nil)
           @category.reload
         end
 
@@ -1186,17 +1240,17 @@ describe Topic do
     let(:user) { Fabricate.build(:user) }
 
     it "returns none when there are no topics" do
-      Topic.for_digest(user, 1.year.ago).should be_blank
+      Topic.for_digest(user, 1.year.ago, top_order: true).should be_blank
     end
 
     it "doesn't return category topics" do
       Fabricate(:category)
-      Topic.for_digest(user, 1.year.ago).should be_blank
+      Topic.for_digest(user, 1.year.ago, top_order: true).should be_blank
     end
 
     it "returns regular topics" do
       topic = Fabricate(:topic)
-      Topic.for_digest(user, 1.year.ago).should == [topic]
+      Topic.for_digest(user, 1.year.ago, top_order: true).should == [topic]
     end
 
   end
@@ -1322,7 +1376,7 @@ describe Topic do
   end
 
   describe "expandable_first_post?" do
-    let(:topic) { Fabricate.build(:topic) } 
+    let(:topic) { Fabricate.build(:topic) }
 
     before do
       SiteSetting.stubs(:embeddable_host).returns("http://eviltrout.com")
@@ -1348,7 +1402,27 @@ describe Topic do
       topic.stubs(:has_topic_embed?).returns(false)
       topic.expandable_first_post?.should be_false
     end
+  end
 
+  it "has custom fields" do
+    topic = Fabricate(:topic)
+    topic.custom_fields["a"].should == nil
 
+    topic.custom_fields["bob"] = "marley"
+    topic.custom_fields["jack"] = "black"
+    topic.save
+
+    topic = Topic.find(topic.id)
+    topic.custom_fields.should == {"bob" => "marley", "jack" => "black"}
+  end
+
+  it "doesn't validate the title again if it isn't changing" do
+    SiteSetting.stubs(:min_topic_title_length).returns(5)
+    topic = Fabricate(:topic, title: "Short")
+    topic.should be_valid
+
+    SiteSetting.stubs(:min_topic_title_length).returns(15)
+    topic.last_posted_at = 1.minute.ago
+    topic.save.should == true
   end
 end

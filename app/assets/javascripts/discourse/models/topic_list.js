@@ -8,7 +8,6 @@
 **/
 
 function finderFor(filter, params) {
-
   return function() {
     var url = Discourse.getURL("/") + filter + ".json";
 
@@ -45,23 +44,12 @@ Discourse.TopicList = Discourse.Model.extend({
     });
   },
 
-  sortOrder: function() {
-    return Discourse.SortOrder.create();
-  }.property(),
-
-  /**
-    If the sort order changes, replace the topics in the list with the new
-    order.
-
-    @observes sortOrder
-  **/
-  _sortOrderChanged: function() {
+  refreshSort: function(order, ascending) {
     var self = this,
-        sortOrder = this.get('sortOrder'),
         params = this.get('params');
 
-    params.sort_order = sortOrder.get('order');
-    params.sort_descending = sortOrder.get('descending');
+    params.order = order;
+    params.ascending = ascending;
 
     this.set('loaded', false);
     var finder = finderFor(this.get('filter'), params);
@@ -73,8 +61,7 @@ Discourse.TopicList = Discourse.Model.extend({
       topics.pushObjects(newTopics);
       self.setProperties({ loaded: true, more_topics_url: result.topic_list.more_topics_url });
     });
-
-  }.observes('sortOrder.order', 'sortOrder.descending'),
+  },
 
   loadMore: function() {
     if (this.get('loadingMore')) { return Ember.RSVP.resolve(); }
@@ -121,10 +108,12 @@ Discourse.TopicList = Discourse.Model.extend({
 
     Discourse.TopicList.loadTopics(topic_ids, this.get('filter'))
       .then(function(newTopics){
+        var i = 0;
         topicList.forEachNew(newTopics, function(t) {
           // highlight the first of the new topics so we can get a visual feedback
           t.set('highlight', true);
-          topics.insertAt(0,t);
+          topics.insertAt(i,t);
+          i++;
         });
         Discourse.Session.currentProp('topicList', topicList);
       });
@@ -141,15 +130,7 @@ Discourse.TopicList.reopenClass({
       if (result) {
         // the new topics loaded from the server
         var newTopics = Discourse.TopicList.topicsFrom(result);
-
-        var topics = _(topic_ids)
-          .map(function(id){
-                  return newTopics.find(function(t){ return t.id === id; });
-                })
-          .compact()
-          .value();
-
-        defer.resolve(topics);
+        defer.resolve(newTopics);
       } else {
         defer.reject();
       }
@@ -175,6 +156,11 @@ Discourse.TopicList.reopenClass({
       t.posters.forEach(function(p) {
         p.user = users[p.user_id];
       });
+      if (t.participants) {
+        t.participants.forEach(function(p) {
+          p.user = users[p.user_id];
+        });
+      }
       return Discourse.Topic.create(t);
     });
   },
@@ -212,11 +198,20 @@ Discourse.TopicList.reopenClass({
     var session = Discourse.Session.current(),
         list = session.get('topicList');
 
-    if (list && (list.get('filter') === filter) && window.location.pathname.indexOf('more') > 0) {
+    if (list && (list.get('filter') === filter)) {
       list.set('loaded', true);
       return Ember.RSVP.resolve(list);
     }
-    session.setProperties({topicList: null, topicListScrollPos: null});
+    session.setProperties({topicList: null, topicListScrollPosition: null});
+
+    // Clean up any string parameters that might slip through
+    params = params || {};
+    Ember.keys(params).forEach(function(k) {
+      var val = params[k];
+      if (val === "undefined" || val === "null" || val === 'false') {
+        params[k] = undefined;
+      }
+    });
 
     var findParams = {};
     Discourse.SiteSettings.top_menu.split('|').forEach(function (i) {

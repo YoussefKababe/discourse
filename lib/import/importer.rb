@@ -5,6 +5,8 @@ module Import
 
   class Importer
 
+    attr_reader :success
+
     def initialize(user_id, filename, publish_to_message_bus = false)
       @user_id, @filename, @publish_to_message_bus = user_id, filename, publish_to_message_bus
 
@@ -24,11 +26,6 @@ module Import
 
       listen_for_shutdown_signal
 
-      enable_readonly_mode
-
-      pause_sidekiq
-      wait_for_sidekiq
-
       ensure_directory_exists(@tmp_directory)
 
       copy_archive_to_tmp_directory
@@ -40,12 +37,22 @@ module Import
       extract_dump
       restore_dump
 
+      ### READ-ONLY / START ###
+      enable_readonly_mode
+
+      pause_sidekiq
+      wait_for_sidekiq
+
       switch_schema!
 
       # TOFIX: MessageBus is busted...
 
       migrate_database
       reconnect_database
+      reload_site_settings
+
+      disable_readonly_mode
+      ### READ-ONLY / END ###
 
       extract_uploads
     rescue SystemExit
@@ -58,7 +65,7 @@ module Import
     else
       @success = true
     ensure
-      notify_user
+      notify_user rescue nil
       clean_up
       @success ? log("[SUCCESS]") : log("[FAILED]")
     end
@@ -74,7 +81,7 @@ module Import
     end
 
     def ensure_we_have_a_user
-      user = User.where(id: @user_id).first
+      user = User.find_by(id: @user_id)
       raise Discourse::InvalidParameters.new(:user_id) unless user
       # keep some user data around to check them against the newly restored database
       @user_info = { id: user.id, username: user.username, email: user.email }
@@ -183,6 +190,7 @@ module Import
       has_error = false
 
       Thread.new do
+        RailsMultisite::ConnectionManagement::establish_connection(db: @current_db)
         while psql_running
           message = logs.pop.strip
           has_error ||= (message =~ /ERROR:/)
@@ -212,6 +220,7 @@ module Import
 
       password_argument = "PGPASSWORD=#{db_conf.password}" if db_conf.password.present?
       host_argument     = "--host=#{db_conf.host}"         if db_conf.host.present?
+      port_argument     = "--port=#{db_conf.port}"         if db_conf.port.present?
       username_argument = "--username=#{db_conf.username}" if db_conf.username.present?
 
       [ password_argument,                # pass the password to psql (if any)
@@ -220,6 +229,7 @@ module Import
         "--file='#{@dump_filename}'",     # read the dump
         "--single-transaction",           # all or nothing (also runs COPY commands faster)
         host_argument,                    # the hostname to connect to (if any)
+        port_argument,                # the port to connect to (if any)
         username_argument                 # the username to connect as (if any)
       ].join(" ")
     end
@@ -246,7 +256,12 @@ module Import
 
     def reconnect_database
       log "Reconnecting to the database..."
-      ActiveRecord::Base.establish_connection
+      RailsMultisite::ConnectionManagement::establish_connection(db: @current_db)
+    end
+
+    def reload_site_settings
+      log "Reloading site settings..."
+      SiteSetting.refresh!
     end
 
     def extract_uploads
@@ -269,13 +284,12 @@ module Import
     end
 
     def notify_user
-      if user = User.where(email: @user_info[:email]).first
+      if user = User.find_by(email: @user_info[:email])
         log "Notifying '#{user.username}' of the end of the restore..."
-        # NOTE: will only notify if user != Discourse.site_contact_user
         if @success
-          SystemMessage.create(user, :import_succeeded)
+          SystemMessage.create_from_system_user(user, :import_succeeded)
         else
-          SystemMessage.create(user, :import_failed, logs: @logs.join("\n"))
+          SystemMessage.create_from_system_user(user, :import_failed, logs: @logs.join("\n"))
         end
       else
         log "Could not send notification to '#{@user_info[:username]}' (#{@user_info[:email]}), because the user does not exists..."
@@ -286,7 +300,7 @@ module Import
       log "Cleaning stuff up..."
       remove_tmp_directory
       unpause_sidekiq
-      disable_readonly_mode
+      disable_readonly_mode if Discourse.readonly_mode?
       mark_import_as_not_running
       log "Finished!"
     end
@@ -301,6 +315,8 @@ module Import
     def unpause_sidekiq
       log "Unpausing sidekiq..."
       Sidekiq.unpause!
+    rescue
+      log "Something went wrong while unpausing Sidekiq."
     end
 
     def disable_readonly_mode

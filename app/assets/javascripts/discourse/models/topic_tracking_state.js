@@ -5,7 +5,6 @@ Discourse.TopicTrackingState = Discourse.Model.extend({
     this._super();
     this.unreadSequence = [];
     this.newSequence = [];
-
     this.states = {};
   },
 
@@ -13,10 +12,20 @@ Discourse.TopicTrackingState = Discourse.Model.extend({
     var tracker = this;
 
     var process = function(data){
-
       if (data.message_type === "delete") {
         tracker.removeTopic(data.topic_id);
         tracker.incrementMessageCount();
+      }
+
+      if (data.message_type === "new_topic" || data.message_type === "latest") {
+        var ignored_categories = Discourse.User.currentProp("muted_category_ids");
+        if(_.include(ignored_categories, data.payload.category_id)){
+          return;
+        }
+      }
+
+      if (data.message_type === "latest"){
+        tracker.notify(data);
       }
 
       if (data.message_type === "new_topic" || data.message_type === "unread" || data.message_type === "read") {
@@ -28,10 +37,10 @@ Discourse.TopicTrackingState = Discourse.Model.extend({
           tracker.incrementMessageCount();
         }
       }
-
     };
 
     Discourse.MessageBus.subscribe("/new", process);
+    Discourse.MessageBus.subscribe("/latest", process);
     var currentUser = Discourse.User.current();
     if(currentUser) {
       Discourse.MessageBus.subscribe("/unread/" + currentUser.id, process);
@@ -51,15 +60,27 @@ Discourse.TopicTrackingState = Discourse.Model.extend({
     if (!this.newIncoming) { return; }
 
     if ((this.filter === "all" ||this.filter === "latest" || this.filter === "new") && data.message_type === "new_topic" ) {
-      this.newIncoming.push(data.topic_id);
+      this.addIncoming(data.topic_id);
     }
-    if ((this.filter === "all" ||this.filter === "latest" || this.filter === "unread") && data.message_type === "unread") {
+
+    if ((this.filter === "all" || this.filter === "unread") && data.message_type === "unread") {
       var old = this.states["t" + data.topic_id];
-      if(!old) {
-        this.newIncoming.push(data.topic_id);
+      if(!old || old.highest_post_number === old.last_read_post_number) {
+        this.addIncoming(data.topic_id);
       }
     }
+
+    if(this.filter === "latest" && data.message_type === "latest") {
+      this.addIncoming(data.topic_id);
+    }
+
     this.set("incomingCount", this.newIncoming.length);
+  },
+
+  addIncoming: function(topicId) {
+    if(this.newIncoming.indexOf(topicId) === -1){
+      this.newIncoming.push(topicId);
+    }
   },
 
   resetTracking: function(){
@@ -120,7 +141,7 @@ Discourse.TopicTrackingState = Discourse.Model.extend({
 
       row.highest_post_number = topic.highest_post_number;
       if (topic.category) {
-        row.category_name = topic.category.name;
+        row.category_id = topic.category.id;
       }
 
       tracker.states["t" + topic.id] = row;
@@ -133,14 +154,15 @@ Discourse.TopicTrackingState = Discourse.Model.extend({
     this.set("messageCount", this.get("messageCount") + 1);
   },
 
-  countNew: function(category_name){
+  countNew: function(category_id){
     return _.chain(this.states)
       .where({last_read_post_number: null})
       .where(function(topic) {
-        return topic.notification_level === null ||
+        // !0 is true
+        return (topic.notification_level !== 0 && !topic.notification_level) ||
                topic.notification_level >= Discourse.Topic.NotificationLevel.TRACKING;
       })
-      .where(function(topic){ return topic.category_name === category_name || !category_name;})
+      .where(function(topic){ return topic.category_id === category_id || !category_id;})
       .value()
       .length;
   },
@@ -154,22 +176,22 @@ Discourse.TopicTrackingState = Discourse.Model.extend({
     });
   },
 
-  countUnread: function(category_name){
+  countUnread: function(category_id){
     return _.chain(this.states)
       .where(function(topic){
         return topic.last_read_post_number !== null &&
                topic.last_read_post_number < topic.highest_post_number;
       })
       .where(function(topic) { return topic.notification_level >= Discourse.Topic.NotificationLevel.TRACKING})
-      .where(function(topic){ return topic.category_name === category_name || !category_name;})
+      .where(function(topic){ return topic.category_id === category_id || !category_id;})
       .value()
       .length;
   },
 
-  countCategory: function(category) {
+  countCategory: function(category_id) {
     var count = 0;
     _.each(this.states, function(topic){
-      if (topic.category_name === category) {
+      if (topic.category_id === category_id) {
         count += (topic.last_read_post_number === null ||
                   topic.last_read_post_number < topic.highest_post_number) ? 1 : 0;
       }

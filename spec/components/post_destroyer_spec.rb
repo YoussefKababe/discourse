@@ -164,7 +164,7 @@ describe PostDestroyer do
 
     context 'topic_user' do
 
-      let(:topic_user) { second_user.topic_users.where(topic_id: topic.id).first }
+      let(:topic_user) { second_user.topic_users.find_by(topic_id: topic.id) }
 
       it 'clears the posted flag for the second user' do
         topic_user.posted?.should be_false
@@ -263,28 +263,49 @@ describe PostDestroyer do
   end
 
   describe "post actions" do
+    let(:second_post) { Fabricate(:post, topic_id: post.topic_id) }
+    let!(:bookmark) { PostAction.act(moderator, second_post, PostActionType.types[:bookmark]) }
+    let!(:flag) { PostAction.act(moderator, second_post, PostActionType.types[:off_topic]) }
+
+    it "should delete public post actions and agree with flags" do
+      second_post.expects(:update_flagged_posts_count)
+
+      PostDestroyer.new(moderator, second_post).destroy
+
+      PostAction.find_by(id: bookmark.id).should == nil
+
+      off_topic = PostAction.find_by(id: flag.id)
+      off_topic.should_not == nil
+      off_topic.agreed_at.should_not == nil
+
+      second_post.reload
+      second_post.bookmark_count.should == 0
+      second_post.off_topic_count.should == 1
+    end
+  end
+
+  describe "user actions" do
     let(:codinghorror) { Fabricate(:coding_horror) }
-    let(:bookmark) { PostAction.new(user_id: post.user_id, post_action_type_id: PostActionType.types[:bookmark] , post_id: post.id) }
     let(:second_post) { Fabricate(:post, topic_id: post.topic_id) }
 
-    it "should reset counts when a post is deleted" do
-      PostAction.act(codinghorror, second_post, PostActionType.types[:off_topic])
-      expect { PostDestroyer.new(moderator, second_post).destroy }.to change(PostAction, :flagged_posts_count).by(-1)
+    def create_user_action(action_type)
+      UserAction.log_action!({
+        action_type: action_type,
+        user_id: codinghorror.id,
+        acting_user_id: codinghorror.id,
+        target_topic_id: second_post.topic_id,
+        target_post_id: second_post.id
+      })
     end
 
-    it "should delete the post actions" do
-      flag = PostAction.act(codinghorror, second_post, PostActionType.types[:off_topic])
+    it "should delete the user actions" do
+      bookmark = create_user_action(UserAction::BOOKMARK)
+      like = create_user_action(UserAction::LIKE)
+
       PostDestroyer.new(moderator, second_post).destroy
-      expect(PostAction.where(id: flag.id).first).to be_nil
-      expect(PostAction.where(id: bookmark.id).first).to be_nil
-    end
 
-    it 'should update flag counts on the post' do
-      PostAction.act(codinghorror, second_post, PostActionType.types[:off_topic])
-      PostDestroyer.new(moderator, second_post.reload).destroy
-      second_post.reload
-      expect(second_post.off_topic_count).to eq(0)
-      expect(second_post.bookmark_count).to eq(0)
+      expect(UserAction.find_by(id: bookmark.id)).to be_nil
+      expect(UserAction.find_by(id: like.id)).to be_nil
     end
   end
 

@@ -1,4 +1,6 @@
 class Group < ActiveRecord::Base
+  include HasCustomFields
+
   has_many :category_groups
   has_many :group_users, dependent: :destroy
 
@@ -8,18 +10,21 @@ class Group < ActiveRecord::Base
   after_save :destroy_deletions
 
   validate :name_format_validator
+  validates_uniqueness_of :name
 
   AUTO_GROUPS = {
     :everyone => 0,
     :admins => 1,
     :moderators => 2,
     :staff => 3,
+    :trust_level_0 => 10,
     :trust_level_1 => 11,
     :trust_level_2 => 12,
     :trust_level_3 => 13,
-    :trust_level_4 => 14,
-    :trust_level_5 => 15
+    :trust_level_4 => 14
   }
+
+  AUTO_GROUP_IDS = Hash[*AUTO_GROUPS.to_a.flatten.reverse]
 
   ALIAS_LEVELS = {
     :nobody => 0,
@@ -77,6 +82,34 @@ class Group < ActiveRecord::Base
       group.name = name
     end
 
+    # Remove people from groups they don't belong in.
+    #
+    # BEWARE: any of these subqueries could match ALL the user records,
+    #         so they can't be used in IN clauses.
+    remove_user_subquery = case name
+                when :admins
+                  "SELECT u.id FROM users u WHERE NOT u.admin"
+                when :moderators
+                  "SELECT u.id FROM users u WHERE NOT u.moderator"
+                when :staff
+                  "SELECT u.id FROM users u WHERE NOT u.admin AND NOT u.moderator"
+                when :trust_level_0, :trust_level_1, :trust_level_2, :trust_level_3, :trust_level_4
+                  "SELECT u.id FROM users u WHERE u.trust_level < #{id - 10}"
+                end
+
+    remove_ids = exec_sql("SELECT gu.id id
+                             FROM group_users gu,
+                                  (#{remove_user_subquery}) u
+                            WHERE gu.group_id = #{group.id}
+                              AND gu.user_id = u.id").map {|x| x['id']}
+
+    if remove_ids.length > 0
+      remove_ids.each_slice(100) do |ids|
+        GroupUser.where(id: ids).delete_all
+      end
+    end
+
+    # Add people to groups
     real_ids = case name
                when :admins
                  "SELECT u.id FROM users u WHERE u.admin"
@@ -84,18 +117,16 @@ class Group < ActiveRecord::Base
                  "SELECT u.id FROM users u WHERE u.moderator"
                when :staff
                  "SELECT u.id FROM users u WHERE u.moderator OR u.admin"
-               when :trust_level_1, :trust_level_2, :trust_level_3, :trust_level_4, :trust_level_5
-                 "SELECT u.id FROM users u WHERE u.trust_level = #{id-10}"
+               when :trust_level_1, :trust_level_2, :trust_level_3, :trust_level_4
+                 "SELECT u.id FROM users u WHERE u.trust_level >= #{id-10}"
+               when :trust_level_0
+                 "SELECT u.id FROM users u"
                end
 
-
-    extra_users = group.users.where("users.id NOT IN (#{real_ids})").select('users.id')
     missing_users = GroupUser
       .joins("RIGHT JOIN (#{real_ids}) X ON X.id = user_id AND group_id = #{group.id}")
       .where("user_id IS NULL")
       .select("X.id")
-
-    group.group_users.where("user_id IN (#{extra_users.to_sql})").delete_all
 
     missing_users.each do |u|
       group.group_users.build(user_id: u.id)
@@ -152,26 +183,54 @@ class Group < ActiveRecord::Base
 
   def self.lookup_group(name)
     if id = AUTO_GROUPS[name]
-      Group.where(id: id).first
+      Group.find_by(id: id)
     else
-      unless group = Group.where(name: name).first
+      unless group = Group.find_by(name: name)
         raise ArgumentError, "unknown group"
       end
       group
     end
   end
 
+  def self.lookup_group_ids(opts)
+    if group_ids = opts[:group_ids]
+      group_ids = group_ids.split(",").map(&:to_i)
+      group_ids = Group.where(id: group_ids).pluck(:id)
+    end
+
+    group_ids ||= []
+
+    if group_names = opts[:group_names]
+      group_names = group_names.split(",")
+      if group_names.present?
+        group_ids += Group.where(name: group_names).pluck(:id)
+      end
+    end
+
+    group_ids
+  end
+
+  def self.desired_trust_level_groups(trust_level)
+    trust_group_ids.keep_if do |id|
+      id == AUTO_GROUPS[:trust_level_0] || (trust_level + 10) >= id
+    end
+  end
 
   def self.user_trust_level_change!(user_id, trust_level)
-    name = "trust_level_#{trust_level}".to_sym
+    desired = desired_trust_level_groups(trust_level)
+    undesired = trust_group_ids - desired
 
-    GroupUser.where(group_id: trust_group_ids, user_id: user_id).delete_all
+    GroupUser.where(group_id: undesired, user_id: user_id).delete_all
 
-    if group = lookup_group(name)
-      group.group_users.build(user_id: user_id)
-      group.save!
-    else
-      refresh_automatic_group!(name)
+    desired.each do |id|
+      if group = find_by(id: id)
+        unless GroupUser.where(group_id: id, user_id: user_id).exists?
+          group.group_users.create!(user_id: user_id)
+        end
+      else
+        name = AUTO_GROUP_IDS[trust_level]
+        refresh_automatic_group!(name)
+      end
     end
   end
 
@@ -235,11 +294,12 @@ end
 #
 #  id          :integer          not null, primary key
 #  name        :string(255)      not null
-#  created_at  :datetime         not null
-#  updated_at  :datetime         not null
+#  created_at  :datetime
+#  updated_at  :datetime
 #  automatic   :boolean          default(FALSE), not null
 #  user_count  :integer          default(0), not null
 #  alias_level :integer          default(0)
+#  visible     :boolean          default(TRUE), not null
 #
 # Indexes
 #

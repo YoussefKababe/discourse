@@ -2,6 +2,8 @@ module Export
 
   class Exporter
 
+    attr_reader :success
+
     def initialize(user_id, publish_to_message_bus = false)
       @user_id, @publish_to_message_bus = user_id, publish_to_message_bus
 
@@ -53,7 +55,7 @@ module Export
       @success = true
       "#{@archive_basename}.tar.gz"
     ensure
-      notify_user
+      notify_user rescue nil
       clean_up
       @success ? log("[SUCCESS]") : log("[FAILED]")
     end
@@ -65,7 +67,7 @@ module Export
     end
 
     def ensure_we_have_a_user
-      @user = User.where(id: @user_id).first
+      @user = User.find_by(id: @user_id)
       raise Discourse::InvalidParameters.new(:user_id) unless @user
     end
 
@@ -144,6 +146,7 @@ module Export
       pg_dump_running = true
 
       Thread.new do
+        RailsMultisite::ConnectionManagement::establish_connection(db: @current_db)
         while pg_dump_running
           message = logs.pop.strip
           log(message) unless message.blank?
@@ -171,6 +174,7 @@ module Export
 
       password_argument = "PGPASSWORD=#{db_conf.password}" if db_conf.password.present?
       host_argument     = "--host=#{db_conf.host}"         if db_conf.host.present?
+      port_argument     = "--port=#{db_conf.port}"         if db_conf.port.present?
       username_argument = "--username=#{db_conf.username}" if db_conf.username.present?
 
       [ password_argument,            # pass the password to pg_dump (if any)
@@ -181,6 +185,7 @@ module Export
         "--no-privileges",            # prevent dumping of access privileges
         "--verbose",                  # specifies verbose mode
         host_argument,                # the hostname to connect to (if any)
+        port_argument,                # the port to connect to (if any)
         username_argument,            # the username to connect as (if any)
         db_conf.database              # the name of the database to dump
       ].join(" ")
@@ -265,11 +270,10 @@ module Export
 
     def notify_user
       log "Notifying '#{@user.username}' of the end of the backup..."
-      # NOTE: will only notify if @user != Discourse.site_contact_user
       if @success
-        SystemMessage.create(@user, :export_succeeded)
+        SystemMessage.create_from_system_user(@user, :export_succeeded)
       else
-        SystemMessage.create(@user, :export_failed, logs: @logs.join("\n"))
+        SystemMessage.create_from_system_user(@user, :export_failed, logs: @logs.join("\n"))
       end
     end
 
@@ -292,6 +296,8 @@ module Export
     def unpause_sidekiq
       log "Unpausing sidekiq..."
       Sidekiq.unpause!
+    rescue
+      log "Something went wrong while unpausing Sidekiq."
     end
 
     def disable_readonly_mode

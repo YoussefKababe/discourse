@@ -23,6 +23,10 @@ Discourse.ClickTrack = {
         topicId = $('#topic').data('topic-id'),
         userId = $link.data('user-id');
 
+    if (!href || href.trim().length === 0){
+      return;
+    }
+
     if (!userId) userId = $article.data('user-id');
 
     var ownLink = userId && (userId === Discourse.User.currentProp('id')),
@@ -41,7 +45,7 @@ Discourse.ClickTrack = {
         // don't update counts in category badge
         if ($link.closest('.badge-category').length === 0) {
           // nor in oneboxes (except when we force it)
-          if ($link.closest(".onebox-result").length === 0 || $link.hasClass("track-link")) {
+          if (($link.closest(".onebox-result").length === 0 && $link.closest('.onebox-body').length === 0) || $link.hasClass("track-link")) {
             var html = $badge.html();
             if (/^\d+$/.test(html)) {
               $badge.html(parseInt(html, 10) + 1);
